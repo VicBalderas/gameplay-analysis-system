@@ -1,187 +1,84 @@
-# 🎮 Gameplay Analysis System
+# AI Gameplay Analysis System
 
-> **An end-to-end AI system for extracting player behavior, tendencies, and evidence-grounded insights from raw gameplay footage.**
+An end-to-end AI pipeline that extracts player behavior, tendencies, and evidence-grounded insights from raw gameplay footage — no game APIs, no stat exports, no post-game summaries.
 
-**Audience:** AI/ML engineers, systems engineers, and technically inclined players interested in explainable, evidence-based performance analysis.
-
-This project is built as an **AI systems pipeline**, not a single-model demo. It separates *seeing* from *reasoning* to produce explainable, reproducible, and actionable insights.
+Built as an AI systems engineering project. The core design problem was making two specialized models work together reliably under real consumer hardware constraints, with every output traceable back to timestamped visual evidence.
 
 ---
 
-## ⚡ TL;DR (One-Screen Overview)
+## How It Works
 
-- 📹 Input: Raw Call of Duty gameplay video (no APIs, no game stats)
-- 👁 Interpreter: Vision-language model produces timestamped narration
-- 🧠 Reasoner: Analysis model extracts patterns and tendencies
-- 📊 Output: Evidence-grounded strengths, weaknesses, and next-match experiments
-- 🧩 Design goal: Explainable AI system under real-world hardware constraints
+The system separates perception from reasoning across two stages:
 
----
+**Interpreter** — a vision-language model that processes gameplay video in overlapping batches, reads HUD elements and player actions, and produces timestamped narration of what happened. Answers: *what happened?*
 
-## ✨ What This System Does
+**Reasoner** — an LLM that consumes the interpreter's output, identifies recurring patterns and tendencies across the match, compares against historical sessions, and produces evidence-grounded recommendations. Answers: *what does it mean?*
 
-- Analyzes **raw gameplay video** (no game APIs or stats exports)
-- Interprets **HUD elements, events, and player actions** using vision-language models
-- Reasons over **patterns and tendencies across time** using a dedicated analysis model
-- Builds a **persistent player profile** that evolves across matches
-- Provides **evidence-backed coaching**, not vague advice
-
-This system answers questions like:
-
-- *What patterns define my playstyle on this map?*
-- *What changed compared to my last match?*
-- *Which habits help me win gunfights faster?*
-- *What specific experiment should I try next match?*
-- *Did I actually apply the previous advice?*
+Every claim the reasoner makes is required to cite a specific timestamp from the interpreter's output. If it cannot, it does not make the claim.
 
 ---
 
-## 🧠 Core Philosophy
-
-- **Explainability first** — every claim is grounded in timestamps and HUD evidence
-- **Separation of concerns** — perception ≠ reasoning
-- **Player-centric** — focuses only on player-controlled decisions
-- **Longitudinal** — insights improve as more matches are analyzed
-- **Real-world constraints** — works on consumer hardware with quantized models
-
----
-
-## 🗂️ High-Level Architecture
+## Architecture
 
 ```
-┌──────────────────┐
-│ Gameplay Video   │
-└────────┬─────────┘
-         ↓
-┌──────────────────┐
-│ Frame Extraction │
-│ & Preprocessing  │
-└────────┬─────────┘
-         ↓
-┌──────────────────────────┐
-│ Interpreter (Perception) │
-│ Vision-Language Model    │
-└────────┬─────────────────┘
-         ↓
-┌──────────────────────────┐
-│ Segmented, Timestamped   │
-│ Narration (What Happened)│
-└────────┬─────────────────┘
-         ↓
-┌──────────────────────────┐
-│ Reasoner (Analysis)      │
-│ Pattern & Tendency Model │
-└────────┬─────────────────┘
-         ↓
-┌──────────────────────────┐
-│ Player Profile +         │
-│ Recommendations          │
-└──────────────────────────┘
+Gameplay Video
+      ↓
+Frame Extraction & Preprocessing
+      ↓
+Interpreter — Vision-Language Model (Qwen3-VL)
+      ↓
+Timestamped Narration (JSON)
+      ↓
+Reasoner — Analysis Model (Qwen3-14B)
+      ↓
+Player Profile + Recommendations
 ```
 
-> **Interpreter** answers *"What happened?"*\
-> **Reasoner** answers *"What does it mean?"*
+The two models are intentionally separate. A single multimodal model capable of both tasks requires VRAM far beyond consumer hardware. Separation also improves explainability and makes each stage independently debuggable.
 
 ---
 
-## 👁 Interpreter (Perception Layer)
+## Key Engineering Decisions
 
-The interpreter is responsible for **seeing and describing the match**.
+**Overlapping batch processing**
+Running VLM inference against decoded video frames hits VRAM limits on a single pass. The system processes frames in overlapping batches — each batch receives both a structured JSON context summary and raw frames from the prior batch. Context alone caused hallucinations in testing because the model had no footage to verify it against. Overlapping frames provide the visual evidence that keeps each batch grounded.
 
-### Responsibilities
+**Structured JSON inter-batch context**
+Context passed between batches is encoded as structured JSON — enough to preserve continuity without consuming the VRAM budget reserved for inference. Models follow structured formats more reliably than free-form text, which reduced context-boundary errors significantly.
 
-- Extract frames from gameplay video at a fixed sampling rate
-- Process frames in **overlapping batches** to preserve temporal continuity
-- Interpret:
-  - HUD text (kills, medals, objectives)
-  - Visible player actions
-  - Environmental interactions
-- Produce **event-driven, timestamped narration**
+**Citation-enforced reasoning**
+The reasoner is prompted to cite a specific interpreter timestamp before stating any claim. This was the solution to a hallucination problem where the model invented gameplay events, patterns, and in-game elements that never appeared in the footage. Requiring citations against a fixed source eliminated fabrication.
 
-### Key Design Choices
-
-- Event-based narration instead of rigid schemas
-  - Smaller / quantized models hallucinate less when allowed natural language
-- Conservative claims policy
-  - Player actions are only stated when supported by HUD or clear visuals
-- Objective medal precision
-  - **"capturing"** → only when HUD explicitly shows capture progress
-  - **"captured"** → treated as team/objective credit unless player presence is explicit
-
-### Output
-
-- Segmented narration blocks with explicit time ranges
-- High recall for HUD elements
-- Explicit uncertainty when evidence is ambiguous
+**Two-model selection**
+Models were selected by benchmarking VLMs and LLMs separately against the specific demands of each stage — visual extraction vs. pattern reasoning — and choosing quantized variants small enough to inference within a 16GB VRAM budget. Qwen3-VL handles the visual stage; Qwen3-14B handles reasoning.
 
 ---
 
-## 🧩 Reasoner (Analysis Layer)
-
-The reasoner is responsible for **judgment, comparison, and insight generation**.
-
-### Responsibilities
-
-- Consume full narration or selected time ranges
-- Identify:
-  - Recurring behaviors
-  - Positional habits
-  - Engagement tendencies
-- Compare current performance against historical matches
-- Generate **actionable, player-focused recommendations**
-- Update a persistent **player profile**
-
-### Hard Constraints
+## Reasoner Constraints
 
 The reasoner is explicitly instructed to:
 
-- ❌ Avoid motivational or "supportive companion" tone
-- ❌ Avoid team coordination or callout advice
-- ❌ Avoid inventing mechanics, vehicles, or scorestreaks
-- ❌ Avoid claims without timestamped evidence
-- ✅ Focus only on player-controlled decisions
-
-### Output
-
-- Pattern-based analysis
-- Strengths and weaknesses with evidence
-- One concrete experiment for the next match
-- Historical comparison when available
+- Cite timestamped evidence from the interpreter before any claim
+- Focus only on player-controlled decisions
+- Avoid motivational or coaching-companion tone
+- Avoid inventing mechanics, scorestreaks, or game elements
+- Avoid team coordination advice
 
 ---
 
-## 🔄 End-to-End Workflow
+## Requirements
 
-1. **Analyze a gameplay video**\
-   Interpreter generates timestamped narration.
-
-2. **Initial reasoning pass**\
-   Reasoner produces structured analysis and recommendations.
-
-3. **Interactive follow-up (optional)**\
-   Ask questions like *"Should I rotate earlier?"* or *"Was my positioning risky here?"*
-
-4. **Profile update**\
-   Tendencies and advice are stored.
-
-5. **Repeat**\
-   Additional matches refine the longitudinal player profile.
-
----
-
-## ⚙️ Usage
-
-### Requirements
-
-- Python **3.12.10** (recommended)
-- Ollama (model serving)
+- Python 3.12.10
+- Ollama
 - FFmpeg
+- GPU with 16GB+ VRAM (RTX 5080 or equivalent)
 - Models:
-  - `qwen3-vl:8b-instruct-q4_K_M` (vision-language)
-  - `qwen3:14b-q4_K_M` (reasoning)
-- GPU with **16GB+ VRAM** (RTX 5080 or equivalent)
+  - `qwen3-vl:8b-instruct-q4_K_M` — visual interpretation
+  - `qwen3:14b-q4_K_M` — behavioral reasoning
 
-### Local Setup
+---
+
+## Setup
 
 ```bash
 pip install -r requirements.txt
@@ -192,21 +89,21 @@ ollama pull qwen3:14b-q4_K_M
 # Place gameplay videos in videos/
 ```
 
-### CLI Commands
+---
 
-The system provides a unified CLI through `main.py`:
+## Usage
 
 ```bash
 # Full pipeline with interactive coaching
 python main.py analyze videos/match.mp4 --map Nuketown --mode Domination
 
-# Batch mode (non-interactive, for automation)
+# Batch mode (non-interactive)
 python main.py analyze videos/match.mp4 --map Nuketown --mode Domination --batch
 
-# Interpreter only (video → narration JSON)
+# Interpreter only — video to narration JSON
 python main.py interpret videos/match.mp4 --map Nuketown --mode Domination
 
-# System health check (verify all components work)
+# System health check
 python main.py check --all
 
 # Profile management
@@ -214,165 +111,55 @@ python main.py profile show
 python main.py profile create --player-id myname
 ```
 
-### CLI Options
+**Common options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--quality` | `high` | Processing quality: `high` or `fast` |
+| `--fps` | `1` | Frames per second to extract |
+| `--overlap` | `5` | Overlap frames between batches |
+| `--batch` | off | Non-interactive batch mode |
+| `--output-dir` | `.` | Output directory |
+
+---
+
+## Docker Deployment
+
+Two containers: `ollama` for model serving, `gameplay` for the analysis pipeline.
 
 ```bash
-# Full options for analyze command
-python main.py analyze VIDEO --map MAP --mode MODE [OPTIONS]
-
-Options:
-  --batch, -b           Non-interactive batch mode
-  --quality, -q         Processing quality: "high" (default) or "fast"
-  --fps                 Frames per second to extract (default: 1)
-  --overlap             Overlap frames between batches (default: 5)
-  --profile, -p         Path to player profile JSON
-  --player-id           Player ID for new profiles
-  --output-dir, -o      Output directory for analysis files
-  --quiet               Reduce output verbosity
-  --ollama-host         Ollama server URL
-  --interpreter-model   Vision model name
-  --reasoner-model      Reasoning model name
-```
-
-### Programmatic Usage
-
-```python
-from interpreter import GameplayInterpreter, MatchMetadata
-from reasoner import GameplayReasoner
-
-# Run interpreter
-interpreter = GameplayInterpreter(quality="high")
-metadata = MatchMetadata(map_name="Nuketown", mode="Domination")
-result = interpreter.analyze("videos/match.mp4", metadata)
-
-# Run reasoner
-reasoner = GameplayReasoner("player_profile.json")
-if not reasoner.has_profile():
-    reasoner.create_profile("player")
-
-session = reasoner.start_session(result)
-print(session.opening_message)
-
-# Interactive chat
-response = reasoner.chat("What should I focus on next match?")
-print(response.message)
-
-# Save session
-summary = reasoner.end_session()
-```
-
-### Docker Deployment
-
-The system runs in Docker with GPU-accelerated Ollama. Two containers: `ollama` for model serving and `gameplay` for the analysis pipeline.
-
-```bash
-# Create directories and configure
-mkdir -p videos output profiles
-
-# Start Ollama and pull models (first time only)
+# First-time setup
 docker compose up -d ollama
 docker compose --profile init up ollama-init
 
-# Run analysis (batch mode)
+# Run analysis
 docker compose run --rm gameplay analyze /app/videos/match.mp4 \
   --map Nuketown --mode Domination --batch
 
-# Run analysis (interactive)
-docker compose run --rm -it gameplay analyze /app/videos/match.mp4 \
-  --map Nuketown --mode Domination
-
-# Run system checks
+# System check
 docker compose run --rm gameplay check --all
 ```
-
-Configuration via environment variables or CLI flags:
-
-| Variable             | Default                        | Description                    |
-| -------------------- | ------------------------------ | ------------------------------ |
-| `OLLAMA_HOST`        | Auto-detected                  | Ollama server URL              |
-| `INTERPRETER_MODEL`  | `qwen3-vl:8b-instruct-q4_K_M`  | Vision model                   |
-| `REASONER_MODEL`     | `qwen3:14b-q4_K_M`             | Reasoning model                |
-| `QUALITY_MODE`       | `high`                         | Processing quality             |
-| `OUTPUT_DIR`         | `.`                            | Output directory               |
-| `PROFILE_PATH`       | `player_profile.json`          | Player profile path            |
 
 See [DOCKER.md](DOCKER.md) for full deployment documentation.
 
 ---
 
-## ⚠️ Limitations & Assumptions (Intentional)
+## Limitations
 
-- Not tested extensively on 10+ minute matches
-- Requires clear HUD visibility
-- No full semantic world modeling or 3D reconstruction
-- Vision-language models may misinterpret ambiguous visuals
-- Designed for systems with 16GB+ VRAM
-- **Assumes Ollama is installed and available locally** for model serving
-
-These constraints exist to preserve **explainability and reproducibility**.
+- Not tested on matches longer than 10 minutes
+- Requires clear HUD visibility throughout
+- VLM may misinterpret ambiguous or fast-moving visuals
+- Requires 16GB+ VRAM for full quality mode
+- Assumes Ollama is installed and running locally
 
 ---
 
-## 🎯 Why This Project Exists
+## Generalizability
 
-Traditional post-game stats answer *"what happened."*\
-This system is built to answer *"why it keeps happening."*
-
-As a player, I noticed recurring gaps between intent and execution—habits I couldn't articulate, positioning tendencies I didn't consciously choose, and patterns that only became obvious when viewed across multiple matches.
-
-This project tackles that problem through **AI systems engineering**:
-
-- Video understanding under real-world hardware constraints
-- Explicit separation of perception and reasoning
-- Evidence-grounded insights (no hallucinated coaching)
-- Stateful, longitudinal player modeling
-- Conversational analysis constrained by hard rules
-
-Beyond gameplay, this project demonstrates end-to-end thinking across:
-
-- Vision-language models
-- Reasoning models
-- Prompt engineering
-- Context management
-- Modular system design
-
-It is built as **portfolio-grade AI systems work**, not a toy demo.
+Currently implemented for Call of Duty. The architecture is game-agnostic — adapting to a different game requires updating the interpreter and reasoner prompts to match the new HUD layout and game mechanics.
 
 ---
 
-## 🤝 Contributing
+## Tech Stack
 
-Contributions are welcome, especially in the following areas:
-
-- Improving vision-language interpretation accuracy
-- Adding support for new game modes or HUD layouts
-- Enhancing reasoning prompts or evaluation logic
-- Performance optimizations for longer matches
-
-Suggested workflow:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make focused, well-documented changes
-4. Submit a pull request with a clear description
-
-This project prioritizes **clarity, evidence-grounding, and reproducibility** over feature sprawl.
-
----
-
-## ❓ FAQ
-
-**Q: Why not use in-game stats or APIs?**\
-A: The goal is to analyze *behavior*, not post-game aggregates. Video captures intent, positioning, and decision-making that stats miss.
-
-**Q: Why separate the interpreter and reasoner?**\
-A: Separation improves explainability, reduces hallucination, and makes debugging and iteration significantly easier.
-
-**Q: Is this meant to replace coaching or VOD review?**\
-A: No. It augments manual review by surfacing patterns that are hard to notice across matches.
-
-**Q: Can this work on lower-end hardware?**\
-A: Partially. Quality modes trade coverage for detail, but 16GB+ VRAM is recommended for full fidelity.
-
-**Q: Is this Call of Duty—specific?**\
-A: The current implementation is, but the architecture is intentionally generalizable. Would only need to tweak prompts to adjust for other games.
+Python · Qwen3-VL · Qwen3-14B · Ollama · FFmpeg · Docker
